@@ -4,6 +4,7 @@ from typing import Any
 
 from .config import settings
 from .context_budget import ContextBudgetManager
+from .utils import cap_query, join_nonempty
 from .zep_common import prime_eval_thread, render_graph_search
 
 
@@ -14,39 +15,71 @@ class StudentMemory:
         self.client = client
         self.budget = ContextBudgetManager(settings.context_tokens)
 
-    # NOTE: Zep rejects graph.search queries longer than 400 characters. Some
-    # eval queries are longer than that, so wrap every query with
-    # `cap_query(query)` (see src/utils.py) before passing it to graph.search.
-
+    # ------------------------------------------------------------------
+    # TODO 1/4 — Long-term: Context Block + fact edges
+    # ------------------------------------------------------------------
     def retrieve_long_term(self, user_id: str, thread_id: str, query: str) -> str:
-        # LAB TODO 1/4
-        # 1) prime_eval_thread(...) has already been provided as scaffolding.
-        # 2) call thread.get_user_context(thread_id=...)
-        # 3) return the .context string.
-        # Bonus: append graph.search(scope="edges", limit>=20) facts with
-        #        validity ranges (a low limit can miss deadline/open-loop facts).
+        # 1) Prime the evaluation thread so Zep knows the current query context
         prime_eval_thread(self.client, user_id, thread_id, query)
-        raise NotImplementedError("LAB TODO: implement long-term retrieval with Zep Context Block")
 
+        # 2) Retrieve the Context Block that Zep assembled for this user/thread
+        user_context = self.client.thread.get_user_context(thread_id=thread_id)
+        context_block = getattr(user_context, "context", "") or ""
+
+        # 3) Bonus: append fact edges with validity ranges for recency/conflict
+        try:
+            facts = self.client.graph.search(
+                user_id=user_id,
+                query=cap_query(query),
+                scope="edges",
+                limit=20,
+            )
+            fact_text = render_graph_search(facts)
+        except Exception:
+            fact_text = ""
+
+        return join_nonempty([context_block, fact_text], sep="\n\n")
+
+    # ------------------------------------------------------------------
+    # TODO 2/4 — Episodic: user graph episode search
+    # ------------------------------------------------------------------
     def retrieve_episodic(self, user_id: str, query: str) -> str:
-        # LAB TODO 2/4
-        # Use client.graph.search(user_id=..., query=cap_query(query),
-        #     scope="episodes", limit=...) then render_graph_search(...).
-        # Tip: verbose session episodes can crowd out concise, marker-bearing
-        # reflections under the tight episodic budget — render_graph_search
-        # accepts an `episode_char_cap` to keep more distinct episodes.
-        raise NotImplementedError("LAB TODO: implement episodic search")
+        results = self.client.graph.search(
+            user_id=user_id,
+            query=cap_query(query),
+            scope="episodes",
+            limit=5,
+        )
+        # Cap each episode to keep more distinct results within budget
+        return render_graph_search(results, episode_char_cap=180)
 
+    # ------------------------------------------------------------------
+    # TODO 3/4 — Semantic: standalone knowledge graph search
+    # ------------------------------------------------------------------
     def retrieve_semantic(self, graph_id: str, query: str) -> str:
-        # LAB TODO 3/4
-        # Search the standalone graph (graph_id, NOT user_id).
-        # Recommended: scope="episodes" — it returns raw document text that keeps
-        # literal markers (e.g. PAYMENT-RULE-3). The "auto" scope returns
-        # extracted facts that DROP those literal codes, so avoid it here.
-        # Fallback: scope="nodes".
-        raise NotImplementedError("LAB TODO: implement semantic graph search")
+        q = cap_query(query)
+        # scope="episodes" preserves literal markers (e.g. PAYMENT-RULE-3)
+        try:
+            results = self.client.graph.search(
+                graph_id=graph_id,
+                query=q,
+                scope="episodes",
+                limit=8,
+            )
+        except Exception:
+            # Fallback to nodes if episodes scope is unsupported
+            results = self.client.graph.search(
+                graph_id=graph_id,
+                query=q,
+                scope="nodes",
+                limit=8,
+            )
+        return render_graph_search(results)
 
+    # ------------------------------------------------------------------
+    # TODO 4/4 — Assemble context with 10/4/3/3 token budget
+    # ------------------------------------------------------------------
     def assemble_context(self, layers: dict[str, str]) -> tuple[str, dict[str, dict[str, int]]]:
-        # LAB TODO 4/4
-        # Use ContextBudgetManager to enforce 10/4/3/3 budget and priority order.
-        raise NotImplementedError("LAB TODO: assemble/trim memory context")
+        # ContextBudgetManager trims each layer to its budget (STM 10%, LTM 4%,
+        # EPI 3%, SEM 3%) in priority order and returns merged text + breakdown.
+        return self.budget.assemble(layers)
