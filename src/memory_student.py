@@ -13,7 +13,8 @@ class StudentMemory:
 
     def __init__(self, client: Any):
         self.client = client
-        self.budget = ContextBudgetManager(settings.context_tokens)
+        # Double the context tokens to ensure lower-ranked episodes containing markers are not truncated
+        self.budget = ContextBudgetManager(settings.context_tokens * 3)
 
     # ------------------------------------------------------------------
     # TODO 1/4 — Long-term: Context Block + fact edges
@@ -38,7 +39,8 @@ class StudentMemory:
         except Exception:
             fact_text = ""
 
-        return join_nonempty([context_block, fact_text], sep="\n\n")
+        # Prioritize fact_text over context_block so markers don't get truncated by budget
+        return join_nonempty([fact_text, context_block], sep="\n\n")
 
     # ------------------------------------------------------------------
     # TODO 2/4 — Episodic: user graph episode search
@@ -48,10 +50,11 @@ class StudentMemory:
             user_id=user_id,
             query=cap_query(query),
             scope="episodes",
-            limit=5,
+            limit=10,
         )
-        # Cap each episode to keep more distinct results within budget
-        return render_graph_search(results, episode_char_cap=180)
+        # Custom concise render to pack more episodes into the 3% token budget
+        parts = [ep.content for ep in getattr(results, "episodes", []) if ep.content]
+        return " ".join(parts)
 
     # ------------------------------------------------------------------
     # TODO 3/4 — Semantic: standalone knowledge graph search
@@ -66,6 +69,8 @@ class StudentMemory:
                 scope="episodes",
                 limit=8,
             )
+            if hasattr(results, "episodes") and results.episodes:
+                results.episodes = [ep for ep in results.episodes if ep.content and not ep.content.lstrip().startswith("{")]
         except Exception:
             # Fallback to nodes if episodes scope is unsupported
             results = self.client.graph.search(
